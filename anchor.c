@@ -1,5 +1,5 @@
 /* =========================
- * Anchor DB – LSM Vertical Slice
+ * Anchor DB – LSM Vertical Slice v2
  * ========================= */
 
 #include <stdio.h>
@@ -104,7 +104,10 @@ static void memtable_init(memtable_t *mt) {
 /* ===================== ROTATION ===================== */
 
 static void rotate_memtable(void) {
-    if (immutable_count >= MAX_IMMUTABLE) return;
+    if (immutable_count >= MAX_IMMUTABLE) {
+        printf("⚠ Immutable memtables full! Flush required.\n");
+        return;
+    }
     immutables[immutable_count++] = active;
     memtable_init(&active);
     printf("→ Memtable rotated (immutables=%zu)\n", immutable_count);
@@ -136,6 +139,14 @@ static void flush_immutable(memtable_t *mt) {
     }
 }
 
+static void flush_all_immutables(void) {
+    while (immutable_count) {
+        flush_immutable(&immutables[0]);
+        memmove(&immutables[0], &immutables[1],
+                sizeof(memtable_t) * --immutable_count);
+    }
+}
+
 /* ===================== INSERT / DELETE ===================== */
 
 static void insert_row(const char *table, char vals[][MAX_VALUE], bool tomb) {
@@ -144,7 +155,12 @@ static void insert_row(const char *table, char vals[][MAX_VALUE], bool tomb) {
 
     bucket_t *b = find_bucket(&active, table);
     if (!b) {
-        b = &active.buckets[active.bucket_count++];
+        if (active.bucket_count >= MAX_TABLES) {
+            rotate_memtable();
+            b = &active.buckets[active.bucket_count++];
+        } else {
+            b = &active.buckets[active.bucket_count++];
+        }
         memset(b, 0, sizeof(*b));
         strcpy(b->table, table);
     }
@@ -203,10 +219,16 @@ static void select_table(const char *name, uint64_t asof) {
                     emit_row(&immutables[m].buckets[b].rows[r], &ctx);
 }
 
+/* ===================== COMPACTION ===================== */
+
+static void compact_sstables(void) {
+    printf("→ Compacting SSTables (placeholder for LSM merge)\n");
+}
+
 /* ===================== DEBUG ===================== */
 
 static void show_memtables(void) {
-    printf("Active rows: %zu\n", active.bucket_count);
+    printf("Active memtable buckets: %zu\n", active.bucket_count);
     printf("Immutable memtables: %zu\n", immutable_count);
 }
 
@@ -214,7 +236,7 @@ static void show_memtables(void) {
 
 static void repl(void) {
     char cmd[256];
-    printf("Anchor DB – LSM Demo\n");
+    printf("Anchor DB – LSM Demo v2\n");
 
     while (1) {
         printf("anchor> ");
@@ -222,21 +244,25 @@ static void repl(void) {
 
         if (!strncmp(cmd, "CREATE USER", 11)) {
             sscanf(cmd, "CREATE USER %31s", users[user_count].name);
+            printf("User created: %s\n", users[user_count].name);
             user_count++;
         }
         else if (!strncmp(cmd, "LOGIN", 5)) {
             char u[32]; sscanf(cmd, "LOGIN %31s", u);
             for (size_t i = 0; i < user_count; i++)
                 if (!strcmp(users[i].name, u)) current_user = &users[i];
+            if (current_user) printf("Logged in as %s\n", current_user->name);
         }
         else if (!strncmp(cmd, "GRANT", 5)) {
             char u[32], r[32]; sscanf(cmd, "GRANT %31s %31s", u, r);
             for (size_t i = 0; i < user_count; i++)
                 if (!strcmp(users[i].name, u))
                     strcpy(users[i].roles[users[i].role_count++], r);
+            printf("Granted role %s to %s\n", r, u);
         }
         else if (!strncmp(cmd, "CREATE TABLE", 12)) {
             sscanf(cmd, "CREATE TABLE %31s", tables[table_count].name);
+            printf("Table created: %s\n", tables[table_count].name);
             table_count++;
         }
         else if (!strncmp(cmd, "ADD", 3)) {
@@ -244,6 +270,7 @@ static void repl(void) {
             sscanf(cmd, "ADD %31s %31s", t, c);
             table_t *tb = find_table(t);
             strcpy(tb->columns[tb->column_count++], c);
+            printf("Added column %s to %s\n", c, t);
         }
         else if (!strncmp(cmd, "INSERT", 6)) {
             char t[32], v1[64], v2[64];
@@ -251,23 +278,22 @@ static void repl(void) {
             char vals[2][MAX_VALUE] = {0};
             strcpy(vals[0], v1); strcpy(vals[1], v2);
             insert_row(t, vals, false);
+            printf("Inserted row v%llu\n", (unsigned long long)global_version);
         }
         else if (!strncmp(cmd, "DELETE", 6)) {
             char t[32]; sscanf(cmd, "DELETE %31s", t);
             insert_row(t, NULL, true);
+            printf("Deleted row in %s (tombstone)\n", t);
         }
         else if (!strncmp(cmd, "SELECT", 6)) {
             char t[32]; uint64_t v = 0;
             sscanf(cmd, "SELECT %31s ASOF %llu", t, &v);
             select_table(t, v);
         }
-        else if (!strncmp(cmd, "FLUSH", 5)) {
-            if (immutable_count) {
-                flush_immutable(&immutables[0]);
-                memmove(&immutables[0], &immutables[1],
-                        sizeof(memtable_t) * --immutable_count);
-            }
-        }
+        else if (!strncmp(cmd, "FLUSH ALL", 9))
+            flush_all_immutables();
+        else if (!strncmp(cmd, "COMPACT", 7))
+            compact_sstables();
         else if (!strncmp(cmd, "SHOW MEMTABLES", 13))
             show_memtables();
         else if (!strncmp(cmd, "EXIT", 4))

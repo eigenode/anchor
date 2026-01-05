@@ -1,3 +1,15 @@
+# Ignore compiled binaries
+anchor
+*.o
+*.exe
+
+# Ignore WAL
+wal.log
+
+# Temporary / backup files
+*~
+*.swp
+
 # Prerequisites
 *.d
 

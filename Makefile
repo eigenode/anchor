@@ -6,4 +6,3 @@ anchor:
 
 clean:
 	rm -f src/*.o anchor
-
