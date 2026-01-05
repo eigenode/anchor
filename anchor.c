@@ -1,352 +1,284 @@
+/* =========================
+ * Anchor DB – LSM Vertical Slice
+ * ========================= */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <time.h>
 
-/* ================= CONFIG ================= */
+/* ===================== CONFIG ===================== */
 
-#define MAX_USERS 16
-#define MAX_ROLES 8
-#define MAX_TABLES 8
-#define MAX_COLUMNS 8
-#define MAX_ROWS 128
-#define MAX_VERSIONS 8
-#define MAX_POLICIES 8
+#define MAX_TABLES     8
+#define MAX_COLUMNS    8
+#define MAX_VALUE      64
+#define MAX_USERS      8
+#define MAX_ROLES      4
+#define MAX_ROWS       5
+#define MAX_IMMUTABLE  8
 
-/* ================= USERS ================= */
-
-typedef struct {
-    char name[32];
-} role_t;
+/* ===================== USERS ===================== */
 
 typedef struct {
     char name[32];
-    role_t roles[MAX_ROLES];
+    char roles[MAX_ROLES][32];
     size_t role_count;
 } user_t;
 
-user_t users[MAX_USERS];
-size_t user_count = 0;
-user_t *current_user = NULL;
+static user_t users[MAX_USERS];
+static size_t user_count;
+static user_t *current_user;
 
-/* ================= SCHEMA ================= */
-
-typedef enum {
-    CLASS_PUBLIC,
-    CLASS_PII
-} classification_t;
+/* ===================== TABLE ===================== */
 
 typedef struct {
     char name[32];
-    classification_t classification;
-} column_t;
-
-typedef struct {
-    column_t columns[MAX_COLUMNS];
+    char columns[MAX_COLUMNS][32];
     size_t column_count;
-} schema_t;
-
-/* ================= POLICY ================= */
-
-typedef struct {
-    int ttl_seconds;
-} table_policy_t;
-
-typedef struct {
-    uint64_t version;
-    time_t created_at;
-    char created_by[32];
-    table_policy_t table_policy;
-} policy_version_t;
-
-typedef struct {
-    policy_version_t versions[MAX_POLICIES];
-    size_t count;
-    uint64_t active;
-} policy_chain_t;
-
-/* ================= STORAGE ================= */
-
-typedef struct {
-    uint64_t version;
-    time_t ts;
-    char owner[32];
-    char values[MAX_COLUMNS][64];
-} row_version_t;
-
-typedef struct {
-    row_version_t versions[MAX_VERSIONS];
-    size_t count;
-} row_t;
-
-typedef struct {
-    char name[32];
-    schema_t schema;
-    policy_chain_t policies;
-    row_t rows[MAX_ROWS];
-    size_t row_count;
+    time_t ttl;
 } table_t;
 
-table_t tables[MAX_TABLES];
-size_t table_count = 0;
+static table_t tables[MAX_TABLES];
+static size_t table_count;
 
-uint64_t global_version = 1;
-
-/* ================= EXECUTION ================= */
+/* ===================== ROW ===================== */
 
 typedef struct {
     uint64_t version;
     time_t ts;
-    char columns[MAX_COLUMNS][64];
-    size_t column_count;
-} logical_row_t;
+    bool tombstone;
+    char values[MAX_COLUMNS][MAX_VALUE];
+} row_t;
+
+/* ===================== MEMTABLE ===================== */
 
 typedef struct {
-    user_t *user;
-    policy_version_t *policy;
-    time_t now;
-} exec_ctx_t;
+    char table[32];
+    row_t rows[MAX_ROWS];
+    size_t count;
+} bucket_t;
 
-typedef void (*row_consumer_fn)(logical_row_t *, void *);
+typedef struct {
+    bucket_t buckets[MAX_TABLES];
+    size_t bucket_count;
+} memtable_t;
 
-/* ================= UTILS ================= */
+/* ===================== LSM STATE ===================== */
 
-void trim(char *s) {
-    s[strcspn(s, "\n")] = 0;
-}
+static memtable_t active;
+static memtable_t immutables[MAX_IMMUTABLE];
+static size_t immutable_count;
+static uint64_t global_version;
+static uint64_t sstable_gen;
 
-int has_role(const char *r) {
-    if (!current_user) return 0;
-    for (size_t i = 0; i < current_user->role_count; i++)
-        if (strcmp(current_user->roles[i].name, r) == 0)
-            return 1;
-    return 0;
-}
+/* ===================== HELPERS ===================== */
 
-table_t *find_table(const char *name) {
+static table_t *find_table(const char *name) {
     for (size_t i = 0; i < table_count; i++)
-        if (strcmp(tables[i].name, name) == 0)
+        if (!strcmp(tables[i].name, name))
             return &tables[i];
     return NULL;
 }
 
-policy_version_t *active_policy(table_t *t) {
-    if (t->policies.count == 0) return NULL;
-    return &t->policies.versions[t->policies.count - 1];
+static bucket_t *find_bucket(memtable_t *mt, const char *table) {
+    for (size_t i = 0; i < mt->bucket_count; i++)
+        if (!strcmp(mt->buckets[i].table, table))
+            return &mt->buckets[i];
+    return NULL;
 }
 
-/* ================= EXECUTION CORE ================= */
-
-int materialize_row(
-    exec_ctx_t *ctx,
-    table_t *table,
-    row_version_t *rv,
-    size_t *proj,
-    size_t proj_count,
-    logical_row_t *out
-) {
-    if (ctx->policy &&
-        ctx->policy->table_policy.ttl_seconds &&
-        ctx->now - rv->ts > ctx->policy->table_policy.ttl_seconds)
-        return 0;
-
-    out->version = rv->version;
-    out->ts = rv->ts;
-    out->column_count = proj_count;
-
-    for (size_t i = 0; i < proj_count; i++) {
-        size_t c = proj[i];
-        column_t *col = &table->schema.columns[c];
-
-        if (col->classification == CLASS_PII &&
-            has_role("support")) {
-            strcpy(out->columns[i], "****");
-        } else {
-            strcpy(out->columns[i], rv->values[c]);
-        }
-    }
-    return 1;
+static bool has_role(const char *r) {
+    if (!current_user) return false;
+    for (size_t i = 0; i < current_user->role_count; i++)
+        if (!strcmp(current_user->roles[i], r))
+            return true;
+    return false;
 }
 
-void exec_select(
-    table_t *table,
-    exec_ctx_t *ctx,
-    size_t *proj,
-    size_t proj_count,
-    row_consumer_fn consume,
-    void *arg
-) {
-    logical_row_t row;
+static void memtable_init(memtable_t *mt) {
+    memset(mt, 0, sizeof(*mt));
+}
 
-    for (size_t i = 0; i < table->row_count; i++) {
-        row_t *r = &table->rows[i];
-        for (int v = (int)r->count - 1; v >= 0; v--) {
-            if (materialize_row(
-                    ctx, table, &r->versions[v],
-                    proj, proj_count, &row)) {
-                consume(&row, arg);
-                break;
-            }
+/* ===================== ROTATION ===================== */
+
+static void rotate_memtable(void) {
+    if (immutable_count >= MAX_IMMUTABLE) return;
+    immutables[immutable_count++] = active;
+    memtable_init(&active);
+    printf("→ Memtable rotated (immutables=%zu)\n", immutable_count);
+}
+
+/* ===================== SSTABLE ===================== */
+
+static void flush_immutable(memtable_t *mt) {
+    for (size_t b = 0; b < mt->bucket_count; b++) {
+        bucket_t *bk = &mt->buckets[b];
+        char fn[64];
+        snprintf(fn, sizeof(fn), "sst_%s_%llu.dat",
+                 bk->table, (unsigned long long)sstable_gen++);
+        FILE *f = fopen(fn, "w");
+        if (!f) continue;
+
+        for (size_t i = 0; i < bk->count; i++) {
+            row_t *r = &bk->rows[i];
+            fprintf(f, "%llu %ld %d",
+                (unsigned long long)r->version,
+                r->ts,
+                r->tombstone ? 1 : 0);
+            for (size_t c = 0; c < MAX_COLUMNS; c++)
+                fprintf(f, " %s", r->values[c]);
+            fprintf(f, "\n");
         }
+        fclose(f);
+        printf("→ Flushed SSTable %s\n", fn);
     }
 }
 
-/* ================= COMMANDS ================= */
+/* ===================== INSERT / DELETE ===================== */
 
-void create_user(const char *name) {
-    user_t *u = &users[user_count++];
-    memset(u, 0, sizeof(*u));
-    strcpy(u->name, name);
-    printf("User created: %s\n", name);
-}
-
-void login(const char *name) {
-    for (size_t i = 0; i < user_count; i++) {
-        if (strcmp(users[i].name, name) == 0) {
-            current_user = &users[i];
-            printf("Logged in as %s\n", name);
-            return;
-        }
-    }
-    printf("User not found\n");
-}
-
-void grant_role(const char *user, const char *role) {
-    for (size_t i = 0; i < user_count; i++) {
-        if (strcmp(users[i].name, user) == 0) {
-            strcpy(users[i].roles[users[i].role_count++].name, role);
-            printf("Granted role %s to %s\n", role, user);
-            return;
-        }
-    }
-}
-
-void create_table(const char *name) {
-    table_t *t = &tables[table_count++];
-    memset(t, 0, sizeof(*t));
-    strcpy(t->name, name);
-    printf("Table created: %s\n", name);
-}
-
-void add_column(const char *table, const char *col) {
+static void insert_row(const char *table, char vals[][MAX_VALUE], bool tomb) {
     table_t *t = find_table(table);
+    if (!t || !current_user) return;
+
+    bucket_t *b = find_bucket(&active, table);
+    if (!b) {
+        b = &active.buckets[active.bucket_count++];
+        memset(b, 0, sizeof(*b));
+        strcpy(b->table, table);
+    }
+
+    if (b->count >= MAX_ROWS) {
+        rotate_memtable();
+        b = &active.buckets[active.bucket_count++];
+        memset(b, 0, sizeof(*b));
+        strcpy(b->table, table);
+    }
+
+    row_t *r = &b->rows[b->count++];
+    r->version = ++global_version;
+    r->ts = time(NULL);
+    r->tombstone = tomb;
+
+    for (size_t i = 0; i < t->column_count; i++)
+        strcpy(r->values[i], vals ? vals[i] : "");
+}
+
+/* ===================== READ ===================== */
+
+typedef struct {
+    table_t *table;
+    uint64_t asof;
+} read_ctx_t;
+
+static void emit_row(row_t *r, read_ctx_t *ctx) {
+    if (r->version > ctx->asof) return;
+    if (r->tombstone) return;
+
+    bool mask = !has_role("admin");
+    for (size_t i = 0; i < ctx->table->column_count; i++)
+        printf("%s=%s ",
+            ctx->table->columns[i],
+            mask ? "****" : r->values[i]);
+
+    printf("(v%llu)\n", (unsigned long long)r->version);
+}
+
+static void select_table(const char *name, uint64_t asof) {
+    table_t *t = find_table(name);
     if (!t) return;
 
-    column_t *c = &t->schema.columns[t->schema.column_count++];
-    strcpy(c->name, col);
-    c->classification = CLASS_PII;
-    printf("Added column %s\n", col);
+    read_ctx_t ctx = { t, asof ? asof : UINT64_MAX };
+
+    for (size_t i = 0; i < active.bucket_count; i++)
+        if (!strcmp(active.buckets[i].table, name))
+            for (size_t r = 0; r < active.buckets[i].count; r++)
+                emit_row(&active.buckets[i].rows[r], &ctx);
+
+    for (ssize_t m = immutable_count - 1; m >= 0; m--)
+        for (size_t b = 0; b < immutables[m].bucket_count; b++)
+            if (!strcmp(immutables[m].buckets[b].table, name))
+                for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
+                    emit_row(&immutables[m].buckets[b].rows[r], &ctx);
 }
 
-policy_version_t *new_policy(table_t *t) {
-    policy_version_t *p = &t->policies.versions[t->policies.count++];
-    memset(p, 0, sizeof(*p));
-    p->version = global_version++;
-    p->created_at = time(NULL);
-    strcpy(p->created_by, current_user->name);
-    t->policies.active = p->version;
-    return p;
+/* ===================== DEBUG ===================== */
+
+static void show_memtables(void) {
+    printf("Active rows: %zu\n", active.bucket_count);
+    printf("Immutable memtables: %zu\n", immutable_count);
 }
 
-void set_ttl(const char *table, int ttl) {
-    table_t *t = find_table(table);
-    if (!t) return;
-    policy_version_t *p = new_policy(t);
-    p->table_policy.ttl_seconds = ttl;
-    printf("TTL set to %d seconds\n", ttl);
-}
+/* ===================== CLI ===================== */
 
-void insert_row(const char *table, char vals[][64]) {
-    table_t *t = find_table(table);
-    if (!t) return;
-
-    row_t *r = &t->rows[t->row_count++];
-    row_version_t *v = &r->versions[r->count++];
-    v->version = global_version++;
-    v->ts = time(NULL);
-    strcpy(v->owner, current_user->name);
-
-    for (size_t i = 0; i < t->schema.column_count; i++)
-        strcpy(v->values[i], vals[i]);
-
-    printf("Inserted row v%llu\n", v->version);
-}
-
-/* ================= OUTPUT ================= */
-
-void print_row(logical_row_t *r, void *arg) {
-    (void)arg;
-    for (size_t i = 0; i < r->column_count; i++)
-        printf("%s ", r->columns[i]);
-    printf("\n");
-}
-
-/* ================= CLI ================= */
-
-void repl() {
-    char line[256];
+static void repl(void) {
+    char cmd[256];
+    printf("Anchor DB – LSM Demo\n");
 
     while (1) {
         printf("anchor> ");
-        if (!fgets(line, sizeof(line), stdin)) break;
-        trim(line);
+        if (!fgets(cmd, sizeof(cmd), stdin)) break;
 
-        char *tok = strtok(line, " ");
-        if (!tok) continue;
-
-        if (!strcmp(tok, "CREATE")) {
-            tok = strtok(NULL, " ");
-            if (!strcmp(tok, "USER"))
-                create_user(strtok(NULL, " "));
-            else if (!strcmp(tok, "TABLE"))
-                create_table(strtok(NULL, " "));
+        if (!strncmp(cmd, "CREATE USER", 11)) {
+            sscanf(cmd, "CREATE USER %31s", users[user_count].name);
+            user_count++;
         }
-        else if (!strcmp(tok, "LOGIN"))
-            login(strtok(NULL, " "));
-        else if (!strcmp(tok, "GRANT"))
-            grant_role(strtok(NULL, " "), strtok(NULL, " "));
-        else if (!strcmp(tok, "ADD"))
-            add_column(strtok(NULL, " "), strtok(NULL, " "));
-        else if (!strcmp(tok, "SET"))
-            set_ttl(strtok(NULL, " "), atoi(strtok(NULL, " ")));
-        else if (!strcmp(tok, "INSERT")) {
-            char *table = strtok(NULL, " ");
-            table_t *t = find_table(table);
-            if (!t) continue;
-
-            char vals[MAX_COLUMNS][64] = {0};
-            for (size_t i = 0; i < t->schema.column_count; i++) {
-                char *v = strtok(NULL, " ");
-                if (!v) break;
-                strcpy(vals[i], v);
+        else if (!strncmp(cmd, "LOGIN", 5)) {
+            char u[32]; sscanf(cmd, "LOGIN %31s", u);
+            for (size_t i = 0; i < user_count; i++)
+                if (!strcmp(users[i].name, u)) current_user = &users[i];
+        }
+        else if (!strncmp(cmd, "GRANT", 5)) {
+            char u[32], r[32]; sscanf(cmd, "GRANT %31s %31s", u, r);
+            for (size_t i = 0; i < user_count; i++)
+                if (!strcmp(users[i].name, u))
+                    strcpy(users[i].roles[users[i].role_count++], r);
+        }
+        else if (!strncmp(cmd, "CREATE TABLE", 12)) {
+            sscanf(cmd, "CREATE TABLE %31s", tables[table_count].name);
+            table_count++;
+        }
+        else if (!strncmp(cmd, "ADD", 3)) {
+            char t[32], c[32];
+            sscanf(cmd, "ADD %31s %31s", t, c);
+            table_t *tb = find_table(t);
+            strcpy(tb->columns[tb->column_count++], c);
+        }
+        else if (!strncmp(cmd, "INSERT", 6)) {
+            char t[32], v1[64], v2[64];
+            sscanf(cmd, "INSERT %31s %63s %63s", t, v1, v2);
+            char vals[2][MAX_VALUE] = {0};
+            strcpy(vals[0], v1); strcpy(vals[1], v2);
+            insert_row(t, vals, false);
+        }
+        else if (!strncmp(cmd, "DELETE", 6)) {
+            char t[32]; sscanf(cmd, "DELETE %31s", t);
+            insert_row(t, NULL, true);
+        }
+        else if (!strncmp(cmd, "SELECT", 6)) {
+            char t[32]; uint64_t v = 0;
+            sscanf(cmd, "SELECT %31s ASOF %llu", t, &v);
+            select_table(t, v);
+        }
+        else if (!strncmp(cmd, "FLUSH", 5)) {
+            if (immutable_count) {
+                flush_immutable(&immutables[0]);
+                memmove(&immutables[0], &immutables[1],
+                        sizeof(memtable_t) * --immutable_count);
             }
-            insert_row(table, vals);
         }
-        else if (!strcmp(tok, "SELECT")) {
-            table_t *t = find_table(strtok(NULL, " "));
-            if (!t) continue;
-
-            exec_ctx_t ctx = {
-                .user = current_user,
-                .policy = active_policy(t),
-                .now = time(NULL)
-            };
-
-            size_t proj[MAX_COLUMNS];
-            for (size_t i = 0; i < t->schema.column_count; i++)
-                proj[i] = i;
-
-            exec_select(t, &ctx, proj, t->schema.column_count,
-                        print_row, NULL);
-        }
-        else if (!strcmp(tok, "QUIT"))
+        else if (!strncmp(cmd, "SHOW MEMTABLES", 13))
+            show_memtables();
+        else if (!strncmp(cmd, "EXIT", 4))
             break;
     }
 }
 
-int main() {
-    printf("Anchor DB (clean execution layer)\n");
+/* ===================== MAIN ===================== */
+
+int main(void) {
+    memtable_init(&active);
     repl();
     return 0;
 }
