@@ -4,7 +4,7 @@
 
 Anchor is a **single-node relational database designed for governance, privacy, and modern compliance needs**.  
 
-> ⚠️ **Note:** Single-node mode is temporary — for this first proof-of-concept (POC). The architecture is designed to eventually scale to multi-node distributed operation.  
+> ⚠️ **Note:** Single-node mode is temporary, this first proof-of-concept (POC) runs entirely in memory. The architecture is designed to eventually scale to **multi-node distributed operation**.  
 
 Unlike traditional databases, Anchor focuses on **privacy by design, versioned rows, and flexible access control**, making it ideal for products where **data protection, auditability, and governance** are critical.
 
@@ -106,11 +106,48 @@ anchor> COMPACT
 → Compacting SSTables (placeholder for LSM merge)
 ```
 
-### Notes
+---
+
+## Notes
 
 - **Deletes:** tombstones hide historical rows; current SELECT returns nothing after deletion.
 - **Time-travel queries:** `ASOF <version>` returns state of data before deletes/updates.
 - **Flush:** writes SSTables to disk but keeps immutables in memory for demo purposes.
 - **Masking:** non-admin users never see sensitive data.
 - **Single-node:** this is a POC mode. Multi-node scaling is planned for future development.
+
+---
+
+## Future Roadmap
+
+Anchor’s design is deliberately modular to grow from a **POC** to a **production-grade database**. Planned enhancements:
+
+1. **Full LSM Storage Engine**
+   - Merge multiple immutable memtables into disk-backed **SSTables**
+   - Implement **tombstone propagation** across flushes for consistent deletes
+   - Column projections to reduce memory and disk usage
+   - Background compaction threads to merge SSTables
+
+2. **SSTable Read API**
+   - Enable queries to automatically read **from disk** if data is not in-memory
+   - Support `ASOF` queries across flushed data
+   - Efficient caching of frequently accessed tables
+
+3. **Extended Access Control & Policies**
+   - Per-column masking and TTL
+   - Multi-scope and group-aware roles
+   - Configurable policy DSL for governance rules
+
+4. **Multi-Node & Distributed Scaling**
+   - Eventually shard tables across nodes
+   - Use consensus / replication for durability
+   - Provide Spanner-like consistency guarantees
+
+5. **Product-Oriented Enhancements**
+   - Logging and audit dashboards for compliance
+   - Metrics on row versions, TTL expirations, and role-based access
+   - Integration hooks for governance and privacy tools
+
+> With this roadmap, Anchor evolves from a **developer-friendly POC** to a **fully-featured governance-oriented relational database**.
+
 
