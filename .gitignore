@@ -7,7 +7,7 @@ anchor
 wal.log
 
 # Ignore Data files
-.dat
+*.dat
 
 # Temporary / backup files
 *~

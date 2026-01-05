@@ -1,5 +1,5 @@
 /* =========================
- * Anchor DB – LSM Fixed Version (Demo-Friendly)
+ * Anchor DB – LSM Fixed ASOF for DELETE
  * ========================= */
 
 #include <stdio.h>
@@ -104,7 +104,7 @@ static void memtable_init(memtable_t *mt) {
 /* ===================== ROTATION ===================== */
 
 static void rotate_memtable(void) {
-    if (active.bucket_count == 0) return; // nothing to rotate
+    if (active.bucket_count == 0) return;
     if (immutable_count >= MAX_IMMUTABLE) return;
     immutables[immutable_count++] = active;
     memtable_init(&active);
@@ -145,10 +145,6 @@ static void flush_all_immutables(void) {
     for (size_t i = 0; i < immutable_count; i++)
         flush_immutable(&immutables[i]);
 
-    // Keep immutables in memory for demo so ASOF queries still work
-    // immutable_count = 0; // commented out on purpose
-
-    // ensure we always have 1 active memtable
     if (active.bucket_count == 0)
         memtable_init(&active);
 }
@@ -189,10 +185,10 @@ typedef struct {
     uint64_t asof;
 } read_ctx_t;
 
-static void emit_row(row_t *r, read_ctx_t *ctx, uint64_t latest_tombstone) {
+static void emit_row(row_t *r, read_ctx_t *ctx, uint64_t asof_tombstone) {
     if (r->version > ctx->asof) return;
     if (r->tombstone) return;
-    if (r->version <= latest_tombstone) return;
+    if (asof_tombstone && r->version <= asof_tombstone) return;
 
     bool mask = !has_role("admin");
     for (size_t i = 0; i < ctx->table->column_count; i++)
@@ -203,41 +199,46 @@ static void emit_row(row_t *r, read_ctx_t *ctx, uint64_t latest_tombstone) {
     printf("(v%llu)\n", (unsigned long long)r->version);
 }
 
+static uint64_t latest_tombstone_asof(const char *table, uint64_t asof) {
+    uint64_t latest = 0;
+
+    for (size_t i = 0; i < active.bucket_count; i++)
+        if (!strcmp(active.buckets[i].table, table))
+            for (size_t r = 0; r < active.buckets[i].count; r++)
+                if (active.buckets[i].rows[r].tombstone &&
+                    active.buckets[i].rows[r].version <= asof)
+                    if (active.buckets[i].rows[r].version > latest)
+                        latest = active.buckets[i].rows[r].version;
+
+    for (ssize_t m = immutable_count - 1; m >= 0; m--)
+        for (size_t b = 0; b < immutables[m].bucket_count; b++)
+            if (!strcmp(immutables[m].buckets[b].table, table))
+                for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
+                    if (immutables[m].buckets[b].rows[r].tombstone &&
+                        immutables[m].buckets[b].rows[r].version <= asof)
+                        if (immutables[m].buckets[b].rows[r].version > latest)
+                            latest = immutables[m].buckets[b].rows[r].version;
+
+    return latest;
+}
+
 static void select_table(const char *name, uint64_t asof) {
     table_t *t = find_table(name);
     if (!t) return;
 
     read_ctx_t ctx = { t, asof ? asof : UINT64_MAX };
+    uint64_t asof_tombstone = latest_tombstone_asof(name, ctx.asof);
 
-    // find latest tombstone version in active + immutables
-    uint64_t latest_tombstone = 0;
     for (size_t i = 0; i < active.bucket_count; i++)
         if (!strcmp(active.buckets[i].table, name))
             for (size_t r = 0; r < active.buckets[i].count; r++)
-                if (active.buckets[i].rows[r].tombstone)
-                    if (active.buckets[i].rows[r].version > latest_tombstone)
-                        latest_tombstone = active.buckets[i].rows[r].version;
+                emit_row(&active.buckets[i].rows[r], &ctx, asof_tombstone);
 
     for (ssize_t m = immutable_count - 1; m >= 0; m--)
         for (size_t b = 0; b < immutables[m].bucket_count; b++)
             if (!strcmp(immutables[m].buckets[b].table, name))
                 for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
-                    if (immutables[m].buckets[b].rows[r].tombstone)
-                        if (immutables[m].buckets[b].rows[r].version > latest_tombstone)
-                            latest_tombstone = immutables[m].buckets[b].rows[r].version;
-
-    // emit active rows
-    for (size_t i = 0; i < active.bucket_count; i++)
-        if (!strcmp(active.buckets[i].table, name))
-            for (size_t r = 0; r < active.buckets[i].count; r++)
-                emit_row(&active.buckets[i].rows[r], &ctx, latest_tombstone);
-
-    // emit immutable rows
-    for (ssize_t m = immutable_count - 1; m >= 0; m--)
-        for (size_t b = 0; b < immutables[m].bucket_count; b++)
-            if (!strcmp(immutables[m].buckets[b].table, name))
-                for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
-                    emit_row(&immutables[m].buckets[b].rows[r], &ctx, latest_tombstone);
+                    emit_row(&immutables[m].buckets[b].rows[r], &ctx, asof_tombstone);
 }
 
 /* ===================== DEBUG ===================== */
@@ -251,7 +252,7 @@ static void show_memtables(void) {
 
 static void repl(void) {
     char cmd[256];
-    printf("Anchor DB – LSM Demo v2\n");
+    printf("Anchor DB – LSM Demo v3\n");
 
     while (1) {
         printf("anchor> ");

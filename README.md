@@ -4,7 +4,7 @@
 
 Anchor is a **single-node relational database designed for governance, privacy, and modern compliance needs**.  
 
-> ⚠️ **Note:** Single-node mode is temporary, this first proof-of-concept (POC) runs entirely in memory. The architecture is designed to eventually scale to **multi-node distributed operation**.  
+> ⚠️ **Note:** Single-node mode is temporary — this first proof-of-concept (POC) runs entirely in memory. The architecture is designed to eventually scale to **multi-node distributed operation**.  
 
 Unlike traditional databases, Anchor focuses on **privacy by design, versioned rows, and flexible access control**, making it ideal for products where **data protection, auditability, and governance** are critical.
 
@@ -40,7 +40,7 @@ Run the interactive demo:
 Prompt:
 
 ```
-Anchor DB – LSM Demo v2
+Anchor DB – LSM Demo v3
 anchor>
 ```
 
@@ -94,60 +94,78 @@ email=alice@mail.com name=Alice (v1)
 email=bob@mail.com name=Bob (v2)
 anchor> SHOW MEMTABLES
 Active memtable buckets: 1
-Immutable memtables: 1
+Immutable memtables: 0
 anchor> FLUSH ALL
-→ Memtable rotated (immutables=2)
+→ Memtable rotated (immutables=1)
 → Flushed SSTable sst_users_0.dat
-→ Flushed SSTable sst_users_1.dat
 anchor> SHOW MEMTABLES
 Active memtable buckets: 1
-Immutable memtables: 2
+Immutable memtables: 1
 anchor> COMPACT
 → Compacting SSTables (placeholder for LSM merge)
 ```
 
 ---
 
-## Notes
+## CLI Cheat Sheet
 
-- **Deletes:** tombstones hide historical rows; current SELECT returns nothing after deletion.
-- **Time-travel queries:** `ASOF <version>` returns state of data before deletes/updates.
-- **Flush:** writes SSTables to disk but keeps immutables in memory for demo purposes.
-- **Masking:** non-admin users never see sensitive data.
-- **Single-node:** this is a POC mode. Multi-node scaling is planned for future development.
+| Command | Description | Example / Expected Output |
+|---------|-------------|--------------------------|
+| `CREATE USER <name>` | Create a new user | `CREATE USER alice` → `User created: alice` |
+| `LOGIN <name>` | Switch current session to a user | `LOGIN alice` → `Logged in as alice` |
+| `GRANT <user> <role>` | Assign role to user | `GRANT alice admin` → `Granted role admin to alice` |
+| `CREATE TABLE <name>` | Create a new table | `CREATE TABLE users` → `Table created: users` |
+| `ADD <table> <column>` | Add column to table | `ADD users email` → `Added column email to users` |
+| `INSERT <table> <val1> <val2> ...` | Insert a row | `INSERT users alice@mail.com Alice` → `Inserted row v1` |
+| `DELETE <table>` | Mark all rows in table with tombstone | `DELETE users` → `Deleted row in users (tombstone)` |
+| `SELECT <table>` | Read current table state | After delete → no rows returned |
+| `SELECT <table> ASOF <version>` | Read table state at specific version | `SELECT users ASOF 1` → `email=alice@mail.com name=Alice (v1)` |
+| `FLUSH ALL` | Flush active and immutable memtables to SSTables | `FLUSH ALL` → `→ Memtable rotated (immutables=N)` + `→ Flushed SSTable sst_users_X.dat` |
+| `SHOW MEMTABLES` | Display active and immutable memtable counts | `Active memtable buckets: 1`<br>`Immutable memtables: 1` |
+| `COMPACT` | Placeholder for future LSM merge | `→ Compacting SSTables (placeholder for LSM merge)` |
+| `EXIT` | Exit CLI | — |
+
+---
+
+## Notes on Behavior
+
+- **Versioning:** Each insert or delete increases `vN`.  
+- **Deletes / Tombstones:** Hide rows for all `SELECT` queries after deletion; historical `ASOF` queries still show pre-delete rows.  
+- **Masking:** Non-admin users see `****` for all columns.  
+- **Flush:** Writes SSTables but preserves an active memtable to allow new inserts.  
+- **ASOF Queries:** Always return the table state **at the requested version**, even across deletes.
 
 ---
 
 ## Future Roadmap
 
-Anchor’s design is deliberately modular to grow from a **POC** to a **production-grade database**. Planned enhancements:
+Anchor’s design is modular to grow from a **POC** to a **production-grade database**. Planned enhancements:
 
 1. **Full LSM Storage Engine**
-   - Merge multiple immutable memtables into disk-backed **SSTables**
-   - Implement **tombstone propagation** across flushes for consistent deletes
-   - Column projections to reduce memory and disk usage
-   - Background compaction threads to merge SSTables
+   - Merge multiple immutable memtables into disk-backed **SSTables**.
+   - Implement **tombstone propagation** across flushes for consistent deletes.
+   - Column projections to reduce memory and disk usage.
+   - Background compaction threads to merge SSTables automatically.
 
 2. **SSTable Read API**
-   - Enable queries to automatically read **from disk** if data is not in-memory
-   - Support `ASOF` queries across flushed data
-   - Efficient caching of frequently accessed tables
+   - Queries automatically read **from disk** if data is not in-memory.
+   - Support `ASOF` queries across flushed data.
+   - Efficient caching of frequently accessed tables.
 
 3. **Extended Access Control & Policies**
-   - Per-column masking and TTL
-   - Multi-scope and group-aware roles
-   - Configurable policy DSL for governance rules
+   - Per-column masking and TTL.
+   - Multi-scope and group-aware roles.
+   - Configurable policy DSL for governance rules.
 
 4. **Multi-Node & Distributed Scaling**
-   - Eventually shard tables across nodes
-   - Use consensus / replication for durability
-   - Provide Spanner-like consistency guarantees
+   - Eventually shard tables across nodes.
+   - Use consensus/replication for durability.
+   - Provide Spanner-like consistency guarantees.
 
 5. **Product-Oriented Enhancements**
-   - Logging and audit dashboards for compliance
-   - Metrics on row versions, TTL expirations, and role-based access
-   - Integration hooks for governance and privacy tools
+   - Logging and audit dashboards for compliance.
+   - Metrics on row versions, TTL expirations, and role-based access.
+   - Integration hooks for governance and privacy tools.
 
-> With this roadmap, Anchor evolves from a **developer-friendly POC** to a **fully-featured governance-oriented relational database**.
-
+> Anchor evolves from a **developer-friendly POC** to a **fully-featured governance-oriented relational database**.
 
