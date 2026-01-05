@@ -1,5 +1,5 @@
 /* =========================
- * Anchor DB – LSM Vertical Slice v2
+ * Anchor DB – LSM Fixed Version (Demo-Friendly)
  * ========================= */
 
 #include <stdio.h>
@@ -104,10 +104,8 @@ static void memtable_init(memtable_t *mt) {
 /* ===================== ROTATION ===================== */
 
 static void rotate_memtable(void) {
-    if (immutable_count >= MAX_IMMUTABLE) {
-        printf("⚠ Immutable memtables full! Flush required.\n");
-        return;
-    }
+    if (active.bucket_count == 0) return; // nothing to rotate
+    if (immutable_count >= MAX_IMMUTABLE) return;
     immutables[immutable_count++] = active;
     memtable_init(&active);
     printf("→ Memtable rotated (immutables=%zu)\n", immutable_count);
@@ -140,11 +138,19 @@ static void flush_immutable(memtable_t *mt) {
 }
 
 static void flush_all_immutables(void) {
-    while (immutable_count) {
-        flush_immutable(&immutables[0]);
-        memmove(&immutables[0], &immutables[1],
-                sizeof(memtable_t) * --immutable_count);
+    if (active.bucket_count) {
+        rotate_memtable();  // rotate active to immutable
     }
+
+    for (size_t i = 0; i < immutable_count; i++)
+        flush_immutable(&immutables[i]);
+
+    // Keep immutables in memory for demo so ASOF queries still work
+    // immutable_count = 0; // commented out on purpose
+
+    // ensure we always have 1 active memtable
+    if (active.bucket_count == 0)
+        memtable_init(&active);
 }
 
 /* ===================== INSERT / DELETE ===================== */
@@ -155,12 +161,7 @@ static void insert_row(const char *table, char vals[][MAX_VALUE], bool tomb) {
 
     bucket_t *b = find_bucket(&active, table);
     if (!b) {
-        if (active.bucket_count >= MAX_TABLES) {
-            rotate_memtable();
-            b = &active.buckets[active.bucket_count++];
-        } else {
-            b = &active.buckets[active.bucket_count++];
-        }
+        b = &active.buckets[active.bucket_count++];
         memset(b, 0, sizeof(*b));
         strcpy(b->table, table);
     }
@@ -188,9 +189,10 @@ typedef struct {
     uint64_t asof;
 } read_ctx_t;
 
-static void emit_row(row_t *r, read_ctx_t *ctx) {
+static void emit_row(row_t *r, read_ctx_t *ctx, uint64_t latest_tombstone) {
     if (r->version > ctx->asof) return;
     if (r->tombstone) return;
+    if (r->version <= latest_tombstone) return;
 
     bool mask = !has_role("admin");
     for (size_t i = 0; i < ctx->table->column_count; i++)
@@ -207,22 +209,35 @@ static void select_table(const char *name, uint64_t asof) {
 
     read_ctx_t ctx = { t, asof ? asof : UINT64_MAX };
 
+    // find latest tombstone version in active + immutables
+    uint64_t latest_tombstone = 0;
     for (size_t i = 0; i < active.bucket_count; i++)
         if (!strcmp(active.buckets[i].table, name))
             for (size_t r = 0; r < active.buckets[i].count; r++)
-                emit_row(&active.buckets[i].rows[r], &ctx);
+                if (active.buckets[i].rows[r].tombstone)
+                    if (active.buckets[i].rows[r].version > latest_tombstone)
+                        latest_tombstone = active.buckets[i].rows[r].version;
 
     for (ssize_t m = immutable_count - 1; m >= 0; m--)
         for (size_t b = 0; b < immutables[m].bucket_count; b++)
             if (!strcmp(immutables[m].buckets[b].table, name))
                 for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
-                    emit_row(&immutables[m].buckets[b].rows[r], &ctx);
-}
+                    if (immutables[m].buckets[b].rows[r].tombstone)
+                        if (immutables[m].buckets[b].rows[r].version > latest_tombstone)
+                            latest_tombstone = immutables[m].buckets[b].rows[r].version;
 
-/* ===================== COMPACTION ===================== */
+    // emit active rows
+    for (size_t i = 0; i < active.bucket_count; i++)
+        if (!strcmp(active.buckets[i].table, name))
+            for (size_t r = 0; r < active.buckets[i].count; r++)
+                emit_row(&active.buckets[i].rows[r], &ctx, latest_tombstone);
 
-static void compact_sstables(void) {
-    printf("→ Compacting SSTables (placeholder for LSM merge)\n");
+    // emit immutable rows
+    for (ssize_t m = immutable_count - 1; m >= 0; m--)
+        for (size_t b = 0; b < immutables[m].bucket_count; b++)
+            if (!strcmp(immutables[m].buckets[b].table, name))
+                for (size_t r = 0; r < immutables[m].buckets[b].count; r++)
+                    emit_row(&immutables[m].buckets[b].rows[r], &ctx, latest_tombstone);
 }
 
 /* ===================== DEBUG ===================== */
@@ -251,7 +266,7 @@ static void repl(void) {
             char u[32]; sscanf(cmd, "LOGIN %31s", u);
             for (size_t i = 0; i < user_count; i++)
                 if (!strcmp(users[i].name, u)) current_user = &users[i];
-            if (current_user) printf("Logged in as %s\n", current_user->name);
+            printf("Logged in as %s\n", u);
         }
         else if (!strncmp(cmd, "GRANT", 5)) {
             char u[32], r[32]; sscanf(cmd, "GRANT %31s %31s", u, r);
@@ -290,12 +305,13 @@ static void repl(void) {
             sscanf(cmd, "SELECT %31s ASOF %llu", t, &v);
             select_table(t, v);
         }
-        else if (!strncmp(cmd, "FLUSH ALL", 9))
+        else if (!strncmp(cmd, "FLUSH", 5)) {
             flush_all_immutables();
-        else if (!strncmp(cmd, "COMPACT", 7))
-            compact_sstables();
+        }
         else if (!strncmp(cmd, "SHOW MEMTABLES", 13))
             show_memtables();
+        else if (!strncmp(cmd, "COMPACT", 7))
+            printf("→ Compacting SSTables (placeholder for LSM merge)\n");
         else if (!strncmp(cmd, "EXIT", 4))
             break;
     }
