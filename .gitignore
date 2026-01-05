@@ -6,6 +6,9 @@ anchor
 # Ignore WAL
 wal.log
 
+# Ignore Data files
+.dat
+
 # Temporary / backup files
 *~
 *.swp
