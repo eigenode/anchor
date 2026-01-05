@@ -2,20 +2,20 @@
 
 ## Overview
 
-Anchor is a **single-node relational database designed for governance, privacy, and modern compliance needs**.  
+Anchor is a single-node relational database designed for governance, privacy, and modern compliance needs.
 
-> ⚠️ **Note:** Single-node mode is temporary — this first proof-of-concept (POC) runs entirely in memory. The architecture is designed to eventually scale to **multi-node distributed operation**.  
+> Note: Single-node mode is temporary. This first proof-of-concept (POC) runs entirely in memory. The architecture is designed to eventually scale to multi-node distributed operation.
 
-Unlike traditional databases, Anchor focuses on **privacy by design, versioned rows, and flexible access control**, making it ideal for products where **data protection, auditability, and governance** are critical.
+Anchor focuses on privacy by design, versioned rows, and flexible access control, making it ideal for products where data protection, auditability, and governance are critical.
 
 ### Key Product Features
 
-- **Governance & compliance:** every row is versioned, allowing audit trails, time-travel queries, and retention policies.
-- **Privacy by design:** built-in column masking and role-based access ensures sensitive information is never exposed accidentally.
-- **Time-travel & audit logs:** query your data at any previous version for auditing or debugging.
-- **TTL & retention policies:** automatically hide or expire old data to support compliance.
-- **Efficient memory usage:** column projections reduce memory footprint for large tables.
-- **Future-proof storage:** current in-memory LSM structure can flush to disk with SSTables for scalability.
+- Governance and compliance: every row is versioned, allowing audit trails, time-travel queries, and retention policies.
+- Privacy by design: built-in column masking and role-based access ensures sensitive information is never exposed accidentally.
+- Time-travel and audit logs: query your data at any previous version for auditing or debugging.
+- TTL and retention policies: automatically hide or expire old data to support compliance.
+- Efficient memory usage: column projections reduce memory footprint for large tables.
+- Future-proof storage: current in-memory LSM structure can flush to disk with SSTables for scalability.
 
 ---
 
@@ -28,6 +28,14 @@ Compile Anchor with C99:
 ```bash
 gcc -std=c99 -O2 -o anchor anchor.c
 ```
+
+Alternatively, use the included Makefile:
+
+```bash
+make
+```
+
+This will generate the `anchor` executable.
 
 ### Running the CLI
 
@@ -48,7 +56,7 @@ anchor>
 
 ## Demo
 
-This demo illustrates **users, roles, masking, inserts, deletes, flush, and time-travel queries**.
+This demo illustrates users, roles, masking, inserts, deletes, flush, and time-travel queries.
 
 ```text
 anchor> CREATE USER alice
@@ -129,43 +137,43 @@ anchor> COMPACT
 
 ## Notes on Behavior
 
-- **Versioning:** Each insert or delete increases `vN`.  
-- **Deletes / Tombstones:** Hide rows for all `SELECT` queries after deletion; historical `ASOF` queries still show pre-delete rows.  
-- **Masking:** Non-admin users see `****` for all columns.  
-- **Flush:** Writes SSTables but preserves an active memtable to allow new inserts.  
-- **ASOF Queries:** Always return the table state **at the requested version**, even across deletes.
+- Versioning: Each insert or delete increases `vN`.
+- Deletes / Tombstones: Hide rows for all `SELECT` queries after deletion; historical `ASOF` queries still show pre-delete rows.
+- Masking: Non-admin users see `****` for all columns.
+- Flush: Writes SSTables but preserves an active memtable to allow new inserts.
+- ASOF Queries: Always return the table state at the requested version, even across deletes.
 
 ---
 
 ## Future Roadmap
 
-Anchor’s design is modular to grow from a **POC** to a **production-grade database**. Planned enhancements:
+Anchor is designed to grow from a POC to a production-grade database. Planned enhancements:
 
-1. **Full LSM Storage Engine**
-   - Merge multiple immutable memtables into disk-backed **SSTables**.
-   - Implement **tombstone propagation** across flushes for consistent deletes.
+1. Full LSM Storage Engine
+   - Merge multiple immutable memtables into disk-backed SSTables.
+   - Implement tombstone propagation across flushes for consistent deletes.
    - Column projections to reduce memory and disk usage.
    - Background compaction threads to merge SSTables automatically.
 
-2. **SSTable Read API**
-   - Queries automatically read **from disk** if data is not in-memory.
-   - Support `ASOF` queries across flushed data.
+2. SSTable Read API
+   - Queries automatically read from disk if data is not in-memory.
+   - Support ASOF queries across flushed data.
    - Efficient caching of frequently accessed tables.
 
-3. **Extended Access Control & Policies**
+3. Extended Access Control and Policies
    - Per-column masking and TTL.
    - Multi-scope and group-aware roles.
    - Configurable policy DSL for governance rules.
 
-4. **Multi-Node & Distributed Scaling**
+4. Multi-Node and Distributed Scaling
    - Eventually shard tables across nodes.
    - Use consensus/replication for durability.
    - Provide Spanner-like consistency guarantees.
 
-5. **Product-Oriented Enhancements**
+5. Product-Oriented Enhancements
    - Logging and audit dashboards for compliance.
    - Metrics on row versions, TTL expirations, and role-based access.
    - Integration hooks for governance and privacy tools.
 
-> Anchor evolves from a **developer-friendly POC** to a **fully-featured governance-oriented relational database**.
+Anchor evolves from a developer-friendly POC to a fully-featured governance-oriented relational database.
 
